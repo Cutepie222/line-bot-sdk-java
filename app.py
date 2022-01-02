@@ -1,144 +1,182 @@
-# LINE Messaging API SDK for Java
+import os
+from flask import Flask, request, redirect, url_for, render_template, send_from_directory, flash, jsonify
+from werkzeug.utils import secure_filename
+import cv2
+import numpy as np
+import json
+import requests
+import tempfile, shutil, os
+from PIL import Image
+from io import BytesIO
 
-[![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.linecorp.bot/line-bot-model/badge.svg)](https://maven-badges.herokuapp.com/maven-central/com.linecorp.bot/line-bot-model)
-[![javadoc](https://javadoc.io/badge2/com.linecorp.bot/line-bot-model/javadoc.svg)](https://javadoc.io/doc/com.linecorp.bot/line-bot-model)
-[![codecov](https://codecov.io/gh/line/line-bot-sdk-java/branch/master/graph/badge.svg)](https://codecov.io/gh/line/line-bot-sdk-java)
+from linebot.models import (
+    TemplateSendMessage, AudioSendMessage,
+    MessageEvent, TextMessage, TextSendMessage,
+    SourceUser, PostbackEvent, StickerMessage, StickerSendMessage, 
+    LocationMessage, LocationSendMessage, ImageMessage, ImageSendMessage
+)
+from linebot.models.template import *
+from linebot import (
+    LineBotApi, WebhookHandler
+)
 
+app = Flask(__name__, static_url_path="/static")
 
-## Introduction
+UPLOAD_FOLDER ='static/uploads/'
+DOWNLOAD_FOLDER = 'static/downloads/'
+ALLOWED_EXTENSIONS = {'jpg', 'png','.jpeg'}
 
-The LINE Messaging API SDK for Java makes it easy to develop bots using LINE Messaging API, and you can create a sample bot within minutes.
+lineaccesstoken = ''
 
+line_bot_api = LineBotApi(lineaccesstoken)
 
-## Documentation
+# APP CONFIGURATIONS
+app.config['SECRET_KEY'] = 'opencv'  
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['DOWNLOAD_FOLDER'] = DOWNLOAD_FOLDER
+# limit upload size upto 6mb
+app.config['MAX_CONTENT_LENGTH'] = 6 * 1024 * 1024
 
-See the official API documentation for more information.
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-- English: https://developers.line.biz/en/docs/messaging-api/overview/
-- Japanese: https://developers.line.biz/ja/docs/messaging-api/overview/
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            flash('No file attached in request')
+            return redirect(request.url)
+        file = request.files['file']
+        if file.filename == '':
+            flash('No file selected')
+            return redirect(request.url)
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            http://file.save(os.path.join(UPLOAD_FOLDER, filename))
+            process_file(os.path.join(UPLOAD_FOLDER, filename), filename)
+            data={
+                "processed_img":'static/downloads/'+filename,
+                "uploaded_img":'static/uploads/'+filename
+            }
+            return render_template("index.html",data=data)  
+    return render_template('index.html')
 
+def process_file(path, filename):
+    detect_object(path, filename)
+    
+def detect_object(path, filename):    
+    CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
+        "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
+        "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
+        "sofa", "train", "tvmonitor"]
+    COLORS = np.random.uniform(0, 255, size=(len(CLASSES), 3))
+    prototxt="ssd/MobileNetSSD_deploy.prototxt.txt"
+    model ="ssd/MobileNetSSD_deploy.caffemodel"
+    net = cv2.dnn.readNetFromCaffe(prototxt, model)
+    image = cv2.imread(path)
+    image = cv2.resize(image,(480,360))
+    (h, w) = image.shape[:2]
+    blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 0.007843, (300, 300), 127.5)
+    net.setInput(blob)
+    detections = net.forward()
+    for i in range(0, detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.60:
+            idx = int(detections[0, 0, i, 1])
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
 
-## Requirements
+            # display the prediction
+            label = "{}: {:.2f}%".format(CLASSES[idx], confidence * 100)
+            # print("[INFO] {}".format(label))
+            cv2.rectangle(image, (startX, startY), (endX, endY),
+                COLORS[idx], 2)
+            y = startY - 15 if startY - 15 > 15 else startY + 15
+            cv2.putText(image, label, (startX, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS[idx], 2)
 
-This library requires Java 8 or later.
+    cv2.imwrite(f"{DOWNLOAD_FOLDER}{filename}",image)
 
+@app.route('/callback', methods=['POST'])
+def callback():
+    json_line = request.get_json(force=False,cache=False)
+    json_line = json.dumps(json_line)
+    decoded = json.loads(json_line)
+    
+    # เชื่อมต่อกับ line 
+    no_event = len(decoded['events'])
+    for i in range(no_event):
+            event = decoded['events'][i]
+            event_handle(event)
 
-## Installation
+    # เชื่อมต่อกับ dialogflow
+    #intent = decoded["queryResult"]["intent"]["displayName"] 
+    #text = decoded['originalDetectIntentRequest']['payload']['data']['message']['text'] 
+    #reply_token = decoded['originalDetectIntentRequest']['payload']['data']['replyToken']
+    #id = decoded['originalDetectIntentRequest']['payload']['data']['source']['userId']
+    #disname = line_bot_api.get_profile(id).display_name
+    #reply(intent,text,reply_token,id,disname)
 
-We've uploaded this library to the Maven Central Repository. You can install the modules using Maven or Gradle.
+    return '',200
 
-http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22com.linecorp.bot%22
+def reply(intent,text,reply_token,id,disname):
+    text_message = TextSendMessage(text="ทดสอบ")
+    line_bot_api.reply_message(reply_token,text_message)
 
+def event_handle(event):
+    print(event)
+    try: 
+        userId = event['source']['userId']
+    except:
+        print('error cannot get userId')
+        return ''
 
-## Modules
+    try:
+        rtoken = event['replyToken']
+    except:
+        print('error cannot get rtoken')
+        return ''
+    try:
+        msgId = event["message"]["id"]
+        msgType = event["message"]["type"]
+    except:
+        print('error cannot get msgID, and msgType')
+        sk_id = np.random.randint(1,17)
+        replyObj = StickerSendMessage(package_id=str(1),sticker_id=str(sk_id))
+        line_bot_api.reply_message(rtoken, replyObj)
+        return ''
 
-This project contains the following modules:
+    if msgType == "text":
+        msg = str(event["message"]["text"])
+        replyObj = TextSendMessage(text=msg)
+        line_bot_api.reply_message(rtoken, replyObj)
+    elif msgType == "image":
+        try:
+            message_content = line_bot_api.get_message_content(event['message']['id'])
+            i = http://Image.open(BytesIO(message_content.content))
+            filename = event['message']['id'] + '.jpg'
+            http://i.save(UPLOAD_FOLDER + filename)
+            process_file(os.path.join(UPLOAD_FOLDER, filename), filename)
 
- * line-bot-api-client: API client library for the Messaging API
- * line-bot-model: Model classes for the Messaging API
- * line-bot-servlet: Java servlet utilities for bot servers
- * line-bot-spring-boot: Spring Boot auto configuration library for bot servers
+            url = request.url_root + DOWNLOAD_FOLDER + filename
+            
+            line_bot_api.reply_message(
+                rtoken, [
+                    TextSendMessage(text='Object detection result:'),
+                    ImageSendMessage(url,url)
+                ])    
+    
+        except:
+            message = TextSendMessage(text="เกิดข้อผิดพลาด กรุณาส่งใหม่อีกครั้ง")
+            line_bot_api.reply_message(event.reply_token, message)
 
-This project contains the following sample projects:
+            return 0
 
- * sample-spring-boot-echo: A simple echo server. It includes a Heroku button.
- * sample-spring-boot-kitchensink: Full featured sample code.
+    else:
+        sk_id = np.random.randint(1,17)
+        replyObj = StickerSendMessage(package_id=str(1),sticker_id=str(sk_id))
+        line_bot_api.reply_message(rtoken, replyObj)
+    return ''
 
-
-## Spring Boot integration
-
-The line-bot-spring-boot module lets you build a bot application as a Spring Boot application.
-
-```java
-/*
- * Copyright 2016 LINE Corporation
- *
- * LINE Corporation licenses this file to you under the Apache License,
- * version 2.0 (the "License"); you may not use this file except in compliance
- * with the License. You may obtain a copy of the License at:
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
-package com.example.bot.spring.echo;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
-import com.linecorp.bot.model.event.Event;
-import com.linecorp.bot.model.event.MessageEvent;
-import com.linecorp.bot.model.event.message.TextMessageContent;
-import com.linecorp.bot.model.message.TextMessage;
-import com.linecorp.bot.spring.boot.annotation.EventMapping;
-import com.linecorp.bot.spring.boot.annotation.LineMessageHandler;
-
-@SpringBootApplication
-@LineMessageHandler
-public class EchoApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(EchoApplication.class, args);
-    }
-
-    @EventMapping
-    public TextMessage handleTextMessageEvent(MessageEvent<TextMessageContent> event) {
-        System.out.println("event: " + event);
-        return new TextMessage(event.getMessage().getText());
-    }
-
-    @EventMapping
-    public void handleDefaultMessageEvent(Event event) {
-        System.out.println("event: " + event);
-    }
-}
-```
-
-## How do I use a proxy server?
-
-You can use `LineMessagingServiceBuilder` to configure a proxy server. It accepts your own OkHttpBuilder instance.
-
-Note: You don't need to use an add-on like Fixie to have static IP addresses for proxy servers. You can make API calls without entering IP addresses on the server IP whitelist.
-
-
-## Help and media
-FAQ: https://developers.line.biz/en/faq/
-
-Community Q&A: https://www.line-community.me/questions
-
-News: https://developers.line.biz/en/news/
-
-Twitter: [@LINE_DEV](https://twitter.com/LINE_DEV)
-
-
-## Versioning
-
-This project respects semantic versioning.
-
-See http://semver.org/.
-
-
-## Contributing
-
-Please check [CONTRIBUTING](CONTRIBUTING.md) before making a contribution.
-
-
-## License
-
-    Copyright (C) 2016 LINE Corp.
-
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+if __name__ == '__main__':
+    http://app.run()
