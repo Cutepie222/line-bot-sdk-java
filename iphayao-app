@@ -1,0 +1,2 @@
+$ heroku git:remote -a iphayao-app
+$ cd iphayao-app
